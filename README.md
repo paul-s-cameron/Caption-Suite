@@ -58,16 +58,18 @@ My changes to this add-on are labelled **AI:W** under the [0rwx framework](https
 1.  **Blender version**: Blender **5.2** or newer.
 2.  **Download**: [Download the add-on as a .zip file](https://github.com/paul-s-cameron/Caption-Suite/archive/refs/heads/main.zip). Do not unzip it.
 3.  **Original add-on**: If you have tin2tin's Subtitle Editor enabled, disable it first.
-4.  **Windows users**: Installing the libraries needs Blender to be run as administrator. Right-click the Blender icon and choose "Run as administrator".
-5.  **Install the add-on**: In Blender, go to `Edit > Preferences > Add-ons`, open the menu in the top right corner and choose `Install from Disk...`. Select the downloaded `.zip` file.
-6.  **Enable the add-on**: Find "Caption Suite" in the list and check the box to enable it.
-7.  **Install the libraries**:
+4.  **Install the add-on**: In Blender, go to `Edit > Preferences > Add-ons`, open the menu in the top right corner and choose `Install from Disk...`. Select the downloaded `.zip` file.
+5.  **Enable the add-on**: Find "Caption Suite" in the list and check the box to enable it.
+6.  **Install the libraries**:
+    *   Make sure `Preferences > System > Network > Allow Online Access` is on.
     *   Go to the Video Sequencer workspace and open the Sidebar (`N` key).
     *   Go to the `Captions` tab and find the **Transcribe** panel.
-    *   Click `Install / Repair`. This downloads `Faster Whisper` and can take several minutes. Progress is shown in the System Console (`Window > Toggle System Console`).
-    *   For an NVIDIA GPU, also click `GPU Libraries`, then restart Blender.
+    *   Click `Install / Repair`. This downloads `Faster Whisper` (about 270 MB installed) and can take several minutes. Progress is shown in the System Console (`Window > Toggle System Console`).
+    *   For an NVIDIA GPU, also click `GPU Libraries` (about 2 GB more).
 
-The libraries are installed into Blender's own Python. After installing a new version of Blender, click `Install / Repair` again.
+You do not need to run Blender as administrator. The libraries go into a folder in your user profile (`%LOCALAPPDATA%\CaptionSuite` on Windows), not into Blender's own folders, and Blender's own libraries are left as they are. Blender versions that use the same Python version share the folder, so a Blender update does not need a new download.
+
+To remove the libraries, click the folder button next to `GPU Libraries`, close Blender and delete the folder.
 
 The first transcription with each model downloads that model. The larger models are several gigabytes.
 
