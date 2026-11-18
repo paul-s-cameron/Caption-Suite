@@ -59,6 +59,7 @@ from bpy.props import (
     StringProperty,
 )
 from bpy.types import Operator, Panel, PropertyGroup, UIList
+from bpy_extras.io_utils import ExportHelper
 
 OS_NAME = platform.system()  # 'Windows', 'Linux', 'Darwin'
 TAB = "Captions"
@@ -1365,6 +1366,67 @@ class SEQUENCER_OT_cc_assign_speaker(Operator):
 
 
 # ---------------------------------------------------------------------------
+# SRT export
+# ---------------------------------------------------------------------------
+
+def _srt_time(ms):
+    ms = max(0, int(round(ms)))
+    h, rem = divmod(ms, 3600000)
+    m, rem = divmod(rem, 60000)
+    sec, ms = divmod(rem, 1000)
+    return f"{h:02}:{m:02}:{sec:02},{ms:03}"
+
+
+class SEQUENCER_OT_cc_export_srt(Operator, ExportHelper):
+    """Save the captions as an SRT subtitle file"""
+    bl_idname = "sequencer.cc_export_srt"
+    bl_label = "Export SRT"
+
+    filename_ext = ".srt"
+    filter_glob: StringProperty(default="*.srt", options={"HIDDEN"})
+    source: EnumProperty(
+        name="Lines",
+        items=[("SENTENCES", "Full Sentences", "Readable subtitle lines from the transcript"),
+               ("CAPTIONS", "As Shown", "One line per caption strip")],
+        default="SENTENCES",
+    )
+
+    def execute(self, context):
+        scene = get_seq_scene(context)
+        fps = scene_fps(scene)
+        origin = scene.frame_start
+
+        def ms(frame):
+            return (frame - origin) / fps * 1000.0
+
+        cues = []
+        if self.source == "SENTENCES" and len(scene.cc_words):
+            cur_seg, buf = None, []
+            for w in scene.cc_words:
+                if buf and (w.seg != cur_seg or w.speaker != buf[-1].speaker):
+                    cues.append((buf[0].start, buf[-1].end, " ".join(x.text for x in buf)))
+                    buf = []
+                cur_seg = w.seg
+                buf.append(w)
+            if buf:
+                cues.append((buf[0].start, buf[-1].end, " ".join(x.text for x in buf)))
+        elif scene.sequence_editor:
+            strips = sorted((st for st in scene.sequence_editor.strips if st.type == "TEXT"),
+                            key=lambda st: st.frame_final_start)
+            cues = [(st.frame_final_start, st.frame_final_end, st.text) for st in strips]
+
+        cues.sort(key=lambda c: c[0])
+        if not cues:
+            self.report({"WARNING"}, "Nothing to export.")
+            return {"CANCELLED"}
+        with open(self.filepath, "w", encoding="utf-8") as f:
+            for n, (a, b, text) in enumerate(cues, 1):
+                f.write(f"{n}\n{_srt_time(ms(a))} --> {_srt_time(ms(b))}\n{text}\n\n")
+        self.report({"INFO"}, f"Exported {len(cues)} lines.")
+        return {"FINISHED"}
+
+
+# ---------------------------------------------------------------------------
 # Panels
 # ---------------------------------------------------------------------------
 
@@ -1560,6 +1622,7 @@ class SEQUENCER_PT_cc_words(_CCPanel, Panel):
             nudge(sub, target, 1, "TRIA_RIGHT")
         box.operator("sequencer.cc_word_break", icon="SCULPTMODE_HLT")
         box.operator("sequencer.cc_keep_moves", icon="SNAP_ON")
+        layout.operator("sequencer.cc_export_srt", icon="EXPORT")
 
 
 # ---------------------------------------------------------------------------
@@ -1584,6 +1647,7 @@ classes = (
     SEQUENCER_OT_cc_word_break,
     SEQUENCER_OT_cc_keep_moves,
     SEQUENCER_OT_cc_assign_speaker,
+    SEQUENCER_OT_cc_export_srt,
     SEQUENCER_PT_cc_transcribe,
     SEQUENCER_PT_cc_style,
     SEQUENCER_PT_cc_build,
