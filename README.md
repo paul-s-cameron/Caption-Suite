@@ -67,13 +67,18 @@ My changes to this add-on are labelled **AI:W** under the [0rwx framework](https
     *   Click `Install / Repair`. This downloads `Faster Whisper` (about 270 MB installed) and can take several minutes. Progress is shown in the System Console (`Window > Toggle System Console`).
     *   For an NVIDIA GPU, also click `GPU Libraries` (about 2 GB more).
 
-You do not need to run Blender as administrator. The libraries go into a folder in your user profile (`%LOCALAPPDATA%\CaptionSuite` on Windows), not into Blender's own folders, and Blender's own libraries are left as they are. Blender versions that use the same Python version share the folder, so a Blender update does not need a new download.
+You do not need to run Blender as administrator, and Blender stays usable while the libraries download. The panel shows how long the install has been running.
 
-To remove the libraries, click the folder button next to `GPU Libraries`, close Blender and delete the folder.
+*   **Transcription libraries** go into the extension's own user folder, which Blender keeps separately for each Blender version. Each Blender version needs its own install, and Blender removes the folder when you uninstall Caption Suite.
+*   **GPU libraries** go into `%LOCALAPPDATA%\CaptionSuite\gpu-cu12` on Windows and are shared by every Blender version. To remove them, click the folder button next to `GPU Libraries`, close Blender and delete the folder.
+
+Blender's own libraries are left as they are. `Install / Repair` replaces the libraries with a fresh copy; if they are in use, restart Blender and click it before transcribing.
 
 ### Upgrading from 3.0 or 3.1
 
-From version 3.2, Caption Suite is a Blender extension (it has a `blender_manifest.toml`). Blender installs extensions under a different name from older add-ons, so the new version does not replace an old one. Remove the old version in `Preferences > Add-ons` first, then install the new zip. Your presets, your libraries and the captions saved in your `.blend` files are kept.
+From version 3.2, Caption Suite is a Blender extension (it has a `blender_manifest.toml`). Blender installs extensions under a different name from older add-ons, so the new version does not replace an old one. Remove the old version in `Preferences > Add-ons` first, then install the new zip and click `Install / Repair` again. Your presets and the captions saved in your `.blend` files are kept.
+
+Version 3.1 kept its libraries in `%LOCALAPPDATA%\CaptionSuite\py313`. That folder is no longer used and can be deleted.
 
 The first transcription with each model downloads that model. The larger models are several gigabytes.
 
