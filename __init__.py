@@ -19,19 +19,9 @@
 # Customized from "Subtitle Editor" by tintwotin
 # (https://github.com/tin2tin/Subtitle_Editor), reworked around word-level
 # timing for short-form captions.
-
-bl_info = {
-    "name": "Caption Suite",
-    "description": "Word-timed Whisper captions with styling, font picker and pop-in animation",
-    "author": "tintwotin, customized",
-    "version": (3, 1, 0),
-    "blender": (5, 2, 0),
-    "location": "Sequencer > Side Bar > Captions Tab",
-    "warning": "Disable the original Subtitle Editor add-on before enabling this one",
-    "doc_url": "",
-    "support": "COMMUNITY",
-    "category": "Sequencer",
-}
+#
+# The add-on's name, version and other details are in blender_manifest.toml.
+# Its panels are in Sequencer > Side Bar > Captions tab.
 
 import os
 import sys

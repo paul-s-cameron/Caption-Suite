@@ -1,0 +1,22 @@
+schema_version = "1.0.0"
+
+id = "caption_suite"
+version = "3.2.0"
+name = "Caption Suite"
+tagline = "Word-timed Whisper captions with styling and animation"
+maintainer = "Paul Cameron"
+type = "add-on"
+
+website = "https://github.com/paul-s-cameron/Caption-Suite"
+
+tags = ["Sequencer"]
+
+blender_version_min = "5.2.0"
+
+license = [
+  "SPDX:GPL-2.0-or-later",
+]
+
+[permissions]
+network = "Download the transcription libraries and Whisper models"
+files = "Read media and fonts, write libraries, presets and SRT files"

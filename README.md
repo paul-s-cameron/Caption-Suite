@@ -59,7 +59,7 @@ My changes to this add-on are labelled **AI:W** under the [0rwx framework](https
 2.  **Download**: [Download the add-on as a .zip file](https://github.com/paul-s-cameron/Caption-Suite/archive/refs/heads/main.zip). Do not unzip it.
 3.  **Original add-on**: If you have tin2tin's Subtitle Editor enabled, disable it first.
 4.  **Install the add-on**: In Blender, go to `Edit > Preferences > Add-ons`, open the menu in the top right corner and choose `Install from Disk...`. Select the downloaded `.zip` file.
-5.  **Enable the add-on**: Find "Caption Suite" in the list and check the box to enable it.
+5.  **Enable the add-on**: If it is not already enabled, find "Caption Suite" in the list and check the box.
 6.  **Install the libraries**:
     *   Make sure `Preferences > System > Network > Allow Online Access` is on.
     *   Go to the Video Sequencer workspace and open the Sidebar (`N` key).
@@ -70,6 +70,10 @@ My changes to this add-on are labelled **AI:W** under the [0rwx framework](https
 You do not need to run Blender as administrator. The libraries go into a folder in your user profile (`%LOCALAPPDATA%\CaptionSuite` on Windows), not into Blender's own folders, and Blender's own libraries are left as they are. Blender versions that use the same Python version share the folder, so a Blender update does not need a new download.
 
 To remove the libraries, click the folder button next to `GPU Libraries`, close Blender and delete the folder.
+
+### Upgrading from 3.0 or 3.1
+
+From version 3.2, Caption Suite is a Blender extension (it has a `blender_manifest.toml`). Blender installs extensions under a different name from older add-ons, so the new version does not replace an old one. Remove the old version in `Preferences > Add-ons` first, then install the new zip. Your presets, your libraries and the captions saved in your `.blend` files are kept.
 
 The first transcription with each model downloads that model. The larger models are several gigabytes.
 
