@@ -39,6 +39,7 @@ import re
 import gc
 import glob
 import shutil
+import struct
 import ctypes
 import platform
 import importlib
@@ -71,6 +72,8 @@ GPU_PACKAGES = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12==9.*"]
 _fw = None                                  # the imported faster_whisper module
 _model_cache = {"key": None, "model": None}
 _suspend = False                            # blocks update callbacks during bulk changes
+_font_cache = []                            # [(display name, path)]
+_font_enum = []                             # enum items, kept alive for Blender
 
 # Example of disfluent speech; nudges Whisper toward keeping stutters and fillers.
 VERBATIM_PROMPT = ("Umm, let me think like, hmm... Okay, here's what I'm, like, thinking. "
@@ -245,6 +248,92 @@ def get_model(size, device, compute):
 # Fonts
 # ---------------------------------------------------------------------------
 
+def _font_dirs():
+    home = os.path.expanduser("~")
+    if OS_NAME == "Windows":
+        return [
+            os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts"),
+        ]
+    if OS_NAME == "Darwin":
+        return ["/System/Library/Fonts", "/Library/Fonts", os.path.join(home, "Library", "Fonts")]
+    return ["/usr/share/fonts", "/usr/local/share/fonts",
+            os.path.join(home, ".fonts"), os.path.join(home, ".local", "share", "fonts")]
+
+
+def _font_full_name(path):
+    """Read the human-readable name from a TTF/OTF file's name table."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+            if len(head) < 12 or head[:4] == b"ttcf":
+                return None
+            num_tables = struct.unpack(">H", head[4:6])[0]
+            name_off = name_len = None
+            for _ in range(num_tables):
+                rec = f.read(16)
+                if len(rec) < 16:
+                    return None
+                tag, _chk, off, length = struct.unpack(">4sLLL", rec)
+                if tag == b"name":
+                    name_off, name_len = off, length
+                    break
+            if name_off is None:
+                return None
+            f.seek(name_off)
+            tbl = f.read(name_len)
+        _fmt, count, str_off = struct.unpack(">HHH", tbl[:6])
+        fallback = None
+        for i in range(count):
+            pid, _eid, lid, nid, ln, off = struct.unpack(">HHHHHH", tbl[6 + i * 12:18 + i * 12])
+            if nid != 4:
+                continue
+            raw = tbl[str_off + off:str_off + off + ln]
+            if pid in (0, 3):
+                name = raw.decode("utf-16-be", "ignore").strip()
+                if name and pid == 3 and lid == 0x409:
+                    return name
+            elif pid == 1:
+                name = raw.decode("mac_roman", "ignore").strip()
+            else:
+                name = ""
+            if name and fallback is None:
+                fallback = name
+        return fallback
+    except Exception:
+        return None
+
+
+def scan_fonts(force=False):
+    global _font_cache, _font_enum
+    if _font_cache and not force:
+        return _font_cache
+    found = {}
+    for folder in _font_dirs():
+        if not folder or not os.path.isdir(folder):
+            continue
+        for root, _dirs, files in os.walk(folder):
+            for fn in files:
+                if not fn.lower().endswith((".ttf", ".otf")):
+                    continue
+                path = os.path.join(root, fn)
+                name = _font_full_name(path) or os.path.splitext(fn)[0]
+                found.setdefault(name, path)
+    _font_cache = sorted(found.items(), key=lambda kv: kv[0].lower())
+    _font_enum = [(str(i), name, path) for i, (name, path) in enumerate(_font_cache)]
+    return _font_cache
+
+
+def font_label(path):
+    if not path:
+        return "Blender default"
+    ap = os.path.normcase(bpy.path.abspath(path))
+    for name, p in _font_cache:
+        if os.path.normcase(p) == ap:
+            return name
+    return os.path.splitext(os.path.basename(path))[0]
+
+
 def load_font(path):
     if not path:
         return None
@@ -256,6 +345,45 @@ def load_font(path):
     except Exception as e:
         print(f"[Captions] Could not load font {ap}: {e}")
         return None
+
+
+def _font_enum_items(self, context):
+    scan_fonts()
+    return _font_enum or [("0", "No fonts found", "")]
+
+
+class SEQUENCER_OT_cc_pick_font(Operator):
+    """Search the fonts installed on this computer and apply one to all captions"""
+    bl_idname = "sequencer.cc_pick_font"
+    bl_label = "Choose Font"
+    bl_property = "font"
+    bl_options = {"REGISTER", "UNDO"}
+
+    font: EnumProperty(name="Font", items=_font_enum_items)
+
+    def execute(self, context):
+        try:
+            _name, path = _font_cache[int(self.font)]
+        except (ValueError, IndexError):
+            return {"CANCELLED"}
+        get_seq_scene(context).cc_settings.font_path = path
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        scan_fonts()
+        context.window_manager.invoke_search_popup(self)
+        return {"FINISHED"}
+
+
+class SEQUENCER_OT_cc_rescan_fonts(Operator):
+    """Rescan the system font folders (after installing a new font)"""
+    bl_idname = "sequencer.cc_rescan_fonts"
+    bl_label = "Rescan Fonts"
+
+    def execute(self, context):
+        n = len(scan_fonts(force=True))
+        self.report({"INFO"}, f"Found {n} fonts.")
+        return {"FINISHED"}
 
 
 # ---------------------------------------------------------------------------
@@ -999,6 +1127,52 @@ class SEQUENCER_PT_cc_transcribe(_CCPanel, Panel):
             col.operator("sequencer.cc_free_model", icon="X")
 
 
+class SEQUENCER_PT_cc_style(_CCPanel, Panel):
+    bl_label = "Caption Look"
+    bl_idname = "SEQUENCER_PT_cc_style"
+
+    def draw(self, context):
+        layout = self.layout
+        s = get_seq_scene(context).cc_settings
+
+        box = layout.box()
+        box.label(text=f"Font: {font_label(s.font_path)}", icon="FONT_DATA")
+        row = box.row(align=True)
+        row.operator("sequencer.cc_pick_font", text="Choose Font", icon="VIEWZOOM")
+        row.operator("sequencer.cc_rescan_fonts", text="", icon="FILE_REFRESH")
+        box.prop(s, "font_path", text="")
+        row = box.row(align=True)
+        row.prop(s, "font_size")
+        row.prop(s, "use_bold", toggle=True)
+        box.prop(s, "color")
+        box.prop(s, "text_case")
+        box.prop(s, "strip_punctuation")
+
+        box = layout.box()
+        box.prop(s, "use_outline")
+        sub = box.row(align=True)
+        sub.enabled = s.use_outline
+        sub.prop(s, "outline_color", text="")
+        sub.prop(s, "outline_width", text="Width")
+        box.prop(s, "use_shadow")
+        sub = box.row()
+        sub.enabled = s.use_shadow
+        sub.prop(s, "shadow_color", text="")
+        box.prop(s, "use_box")
+        sub = box.row(align=True)
+        sub.enabled = s.use_box
+        sub.prop(s, "box_color", text="")
+        sub.prop(s, "box_margin", text="Margin")
+
+        box = layout.box()
+        box.label(text="Position")
+        row = box.row(align=True)
+        row.prop(s, "pos_x")
+        row.prop(s, "pos_y")
+        box.prop(s, "wrap_width")
+        layout.label(text="Changes here apply to all captions instantly.", icon="INFO")
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -1009,8 +1183,11 @@ classes = (
     ExtraSpeaker,
     SEQUENCER_OT_cc_setup,
     SEQUENCER_OT_cc_free_model,
+    SEQUENCER_OT_cc_pick_font,
+    SEQUENCER_OT_cc_rescan_fonts,
     SEQUENCER_OT_cc_transcribe,
     SEQUENCER_PT_cc_transcribe,
+    SEQUENCER_PT_cc_style,
 )
 
 
