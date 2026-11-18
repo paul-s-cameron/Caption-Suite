@@ -80,7 +80,7 @@ From version 3.2, Caption Suite is a Blender extension (it has a `blender_manife
 
 Version 3.1 kept its libraries in `%LOCALAPPDATA%\CaptionSuite\py313`. That folder is no longer used and can be deleted.
 
-The first transcription with each model downloads that model. The larger models are several gigabytes.
+The first transcription with each model downloads that model. The larger models are several gigabytes. With `Allow Online Access` off, Caption Suite stays offline and can only use models it has already downloaded.
 
 ## Quick start
 

@@ -432,9 +432,13 @@ def get_model(size, device, compute):
         _model_cache["model"] = None
         gc.collect()
         print(f"[Captions] Loading model {size} ({device}, {compute})")
+        # Blender's rule: no internet unless Allow Online Access is on. Offline, only a model
+        # that has already been downloaded can be used; this raises if it has not.
+        offline = not getattr(bpy.app, "online_access", True)
+        path = faster_whisper.download_model(size, local_files_only=offline)
         if device == "cuda":
             _gpu_used = True
-        _model_cache["model"] = faster_whisper.WhisperModel(size, device=device, compute_type=compute)
+        _model_cache["model"] = faster_whisper.WhisperModel(path, device=device, compute_type=compute)
         _model_cache["key"] = key
     return _model_cache["model"]
 
@@ -1185,6 +1189,9 @@ def get_source_strip(context):
 
 def whisper_error_message(e):
     low = str(e).lower()
+    if type(e).__name__ == "LocalEntryNotFoundError" or "local_files_only" in low:
+        return ("This model is not downloaded yet and Blender is set to work offline. Turn on Preferences > "
+                "System > Network > Allow Online Access, or choose a model you have already used.")
     if "cublas" in low or "cudnn" in low or "cuda" in low:
         return "GPU libraries are missing. Click 'GPU Libraries', or switch Device to CPU."
     if "metadata_errors" in low:
