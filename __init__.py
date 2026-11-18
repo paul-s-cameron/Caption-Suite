@@ -24,7 +24,7 @@ bl_info = {
     "name": "Caption Suite",
     "description": "Word-timed Whisper captions with styling, font picker and pop-in animation",
     "author": "tintwotin, customized",
-    "version": (3, 0, 0),
+    "version": (3, 1, 0),
     "blender": (5, 2, 0),
     "location": "Sequencer > Side Bar > Captions Tab",
     "warning": "Disable the original Subtitle Editor add-on before enabling this one",
@@ -39,13 +39,12 @@ import re
 import gc
 import glob
 import json
-import shutil
 import struct
 import ctypes
 import platform
 import importlib
+import importlib.metadata
 import subprocess
-import sysconfig
 import traceback
 
 import bpy
@@ -134,19 +133,74 @@ def check_faster_whisper():
         return False
 
 
-def _site_packages():
-    return sysconfig.get_paths()["purelib"]
+def lib_dir():
+    """Folder the add-on keeps its libraries in.
+
+    It is outside Blender's own Python folder, so installing needs no administrator
+    rights and never replaces a library Blender ships. It is named for the Python
+    version, so every Blender that uses this Python shares one copy.
+    """
+    home = os.path.expanduser("~")
+    if OS_NAME == "Windows":
+        root = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+    elif OS_NAME == "Darwin":
+        root = os.path.join(home, "Library", "Application Support")
+    else:
+        root = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    return os.path.join(root, "CaptionSuite", f"py{sys.version_info.major}{sys.version_info.minor}")
 
 
-def _can_write(folder):
-    probe = os.path.join(folder, "_cc_write_test.tmp")
-    try:
-        with open(probe, "w") as f:
-            f.write("x")
-        os.remove(probe)
-        return True
-    except OSError:
-        return False
+def _gpu_dll_dirs(folder):
+    return sorted(glob.glob(os.path.join(folder, "nvidia", "*", "bin")))
+
+
+def use_lib_dir():
+    """Let Python, and on Windows the DLL loader, find the libraries in lib_dir()."""
+    folder = lib_dir()
+    if not os.path.isdir(folder):
+        return
+    # Last on the search path: a library Blender ships is always found first.
+    if folder not in sys.path:
+        sys.path.append(folder)
+    if OS_NAME == "Windows":
+        # ctranslate2 loads the NVIDIA DLLs by name, which searches PATH. os.add_dll_directory
+        # does not work for it. Added last, so a system-wide CUDA install keeps priority.
+        parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+        for d in _gpu_dll_dirs(folder):
+            if d not in parts:
+                parts.append(d)
+        os.environ["PATH"] = os.pathsep.join(parts)
+
+
+def drop_lib_dir():
+    """Undo use_lib_dir() when the add-on is disabled."""
+    folder = lib_dir()
+    if folder in sys.path:
+        sys.path.remove(folder)
+    if OS_NAME == "Windows":
+        inside = os.path.normcase(folder) + os.sep
+        parts = [p for p in os.environ.get("PATH", "").split(os.pathsep)
+                 if p and not os.path.normcase(p).startswith(inside)]
+        os.environ["PATH"] = os.pathsep.join(parts)
+
+
+def _write_constraints(folder):
+    """List the libraries Blender ships, so pip picks versions that agree with them.
+
+    The folder comes last on the search path, so Blender's copy of a shared library
+    (numpy, for one) is the one that gets imported. Whatever is installed has to work with it.
+    """
+    own = os.path.normcase(folder)
+    pins = set()
+    for dist in importlib.metadata.distributions():
+        name = dist.metadata["Name"]
+        if not name or os.path.normcase(str(dist.locate_file(""))).startswith(own):
+            continue
+        pins.add(f"{name}=={dist.version}")
+    path = os.path.join(folder, "blender_constraints.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(sorted(pins)) + "\n")
+    return path
 
 
 def _pip(args):
@@ -161,23 +215,8 @@ def _pip(args):
     return p.returncode == 0
 
 
-def _copy_gpu_dlls(site_dir):
-    """Copy NVIDIA DLLs next to ctranslate2, the only place it finds them on Windows."""
-    target = os.path.join(site_dir, "ctranslate2")
-    if not os.path.isdir(target):
-        return 0
-    copied = 0
-    for dll in glob.glob(os.path.join(site_dir, "nvidia", "*", "bin", "*.dll")):
-        try:
-            shutil.copy2(dll, target)
-            copied += 1
-        except OSError as e:
-            print(f"[Captions] Could not copy {os.path.basename(dll)}: {e}")
-    return copied
-
-
 class SEQUENCER_OT_cc_setup(Operator):
-    """Install or repair the transcription libraries inside Blender's Python"""
+    """Install or repair the transcription libraries in the add-on's own folder. No administrator rights needed"""
     bl_idname = "sequencer.cc_setup"
     bl_label = "Install / Repair"
     bl_options = {"REGISTER", "INTERNAL"}
@@ -186,33 +225,38 @@ class SEQUENCER_OT_cc_setup(Operator):
 
     def execute(self, context):
         global _fw
-        site_dir = _site_packages()
-        if not _can_write(site_dir):
-            if OS_NAME == "Windows":
-                msg = ("Blender's Python folder is read-only. Close Blender, right-click it, "
-                       "choose 'Run as administrator', then click this button again (one time only).")
-            else:
-                msg = f"Blender's Python folder is not writable: {site_dir}"
-            self.report({"ERROR"}, msg)
+        if not getattr(bpy.app, "online_access", True):
+            self.report({"ERROR"}, "Blender is set to work offline. Turn on Preferences > System > "
+                                   "Network > Allow Online Access, then click this button again.")
+            return {"CANCELLED"}
+        folder = lib_dir()
+        try:
+            os.makedirs(folder, exist_ok=True)
+            constraints = _write_constraints(folder)
+        except OSError as e:
+            self.report({"ERROR"}, f"Could not write to the library folder {folder}: {e}")
             return {"CANCELLED"}
 
         show_system_console()
         subprocess.run([sys.executable, "-m", "ensurepip"], capture_output=True)
         packages = GPU_PACKAGES if self.gpu else BASE_PACKAGES
+        args = ["install", "--target", folder, "--constraint", constraints, "--no-warn-script-location"]
+        # Replace what is there, except while the libraries are loaded and working: Windows
+        # locks loaded files. Without --upgrade pip only adds what is missing.
+        if self.gpu or _fw is None:
+            args.append("--upgrade")
         self.report({"INFO"}, "Installing, see the System Console for progress...")
-        if not _pip(["install", "--no-warn-script-location"] + packages):
-            self.report({"ERROR"}, "Install failed. See Window > Toggle System Console.")
+        if not _pip(args + packages):
+            self.report({"ERROR"}, "Install failed. If you already transcribed in this session, restart "
+                                   "Blender and try again. See Window > Toggle System Console.")
             return {"CANCELLED"}
+        use_lib_dir()
 
         if self.gpu:
-            if OS_NAME == "Windows":
-                n = _copy_gpu_dlls(site_dir)
-                if n == 0:
-                    self.report({"ERROR"}, "GPU libraries downloaded but no DLLs were copied. See console.")
-                    return {"CANCELLED"}
-                self.report({"INFO"}, f"GPU libraries installed ({n} files). Restart Blender.")
-            else:
-                self.report({"INFO"}, "GPU libraries installed. Restart Blender.")
+            if OS_NAME == "Windows" and not _gpu_dll_dirs(folder):
+                self.report({"ERROR"}, "GPU libraries downloaded but their DLLs were not found. See console.")
+                return {"CANCELLED"}
+            self.report({"INFO"}, "GPU libraries installed. Restart Blender if they are not picked up.")
             return {"FINISHED"}
 
         _fw = None
@@ -220,6 +264,20 @@ class SEQUENCER_OT_cc_setup(Operator):
             self.report({"INFO"}, "Transcription libraries are ready.")
         else:
             self.report({"WARNING"}, "Installed. Restart Blender to finish.")
+        return {"FINISHED"}
+
+
+class SEQUENCER_OT_cc_open_lib_dir(Operator):
+    """Open the folder the transcription libraries are installed in. To remove them, close Blender and delete it"""
+    bl_idname = "sequencer.cc_open_lib_dir"
+    bl_label = "Open Library Folder"
+
+    def execute(self, context):
+        folder = lib_dir()
+        if not os.path.isdir(folder):
+            self.report({"WARNING"}, "Nothing is installed in the library folder yet.")
+            return {"CANCELLED"}
+        bpy.ops.wm.path_open(filepath=folder)
         return {"FINISHED"}
 
 
@@ -994,9 +1052,9 @@ def get_source_strip(context):
 def whisper_error_message(e):
     low = str(e).lower()
     if "cublas" in low or "cudnn" in low or "cuda" in low:
-        return "GPU libraries are missing. Click 'GPU Libraries' (as administrator), or switch Device to CPU."
+        return "GPU libraries are missing. Click 'GPU Libraries', or switch Device to CPU."
     if "metadata_errors" in low:
-        return "Incompatible audio library. Click 'Install / Repair' (as administrator)."
+        return "Incompatible audio library. Restart Blender, then click 'Install / Repair' before transcribing."
     if "memory" in low:
         return "Out of memory. Try a smaller model."
     return f"Transcription failed: {e}"
@@ -1548,6 +1606,7 @@ class SEQUENCER_PT_cc_transcribe(_CCPanel, Panel):
         row.operator("sequencer.cc_setup", text="Install / Repair").gpu = False
         if OS_NAME != "Darwin":
             row.operator("sequencer.cc_setup", text="GPU Libraries").gpu = True
+        row.operator("sequencer.cc_open_lib_dir", text="", icon="FILE_FOLDER")
 
         col = layout.column()
         col.enabled = ready
@@ -1737,6 +1796,7 @@ classes = (
     CaptionWord,
     ExtraSpeaker,
     SEQUENCER_OT_cc_setup,
+    SEQUENCER_OT_cc_open_lib_dir,
     SEQUENCER_OT_cc_free_model,
     SEQUENCER_OT_cc_pick_font,
     SEQUENCER_OT_cc_rescan_fonts,
@@ -1771,6 +1831,7 @@ def register():
     bpy.types.Scene.cc_word_index = IntProperty(default=0, update=word_index_update)
     bpy.types.Scene.cc_generation = IntProperty(default=0)
     bpy.types.Scene.cc_channel_used = IntProperty(default=0)
+    use_lib_dir()
     check_faster_whisper()
 
 
@@ -1782,6 +1843,7 @@ def unregister():
             delattr(bpy.types.Scene, prop)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    drop_lib_dir()
 
 
 if __name__ == "__main__":
