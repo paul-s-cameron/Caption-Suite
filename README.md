@@ -1,10 +1,10 @@
-[<img src="https://img.shields.io/badge/Discord%20-%20Invite">](https://discord.gg/HMYpnPzbTm) ![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/tintwotin)
+# Caption Suite
 
-# Blender Subtitle Editor
+Word-timed captions for the Blender Video Sequence Editor (VSE).
 
-A suite of tools to empower working with subtitles and text strips in the Blender Video Sequence Editor (VSE).
+Caption Suite transcribes a video or audio strip with **Faster Whisper** and keeps the timing of every word. From those words it builds short, styled, animated caption strips, and it gives you tools to restyle, regroup and correct them without transcribing again.
 
-The addon's core feature is high-performance, multi-language audio transcription and translation powered by **Faster Whisper**. It also includes a full set of tools for importing, exporting, editing, and managing subtitles, such as a convenient list editor, batch styling, and timeline navigation.
+It is a fork of [Subtitle Editor](https://github.com/tin2tin/Subtitle_Editor) by tin2tin, rewritten around word-level timing. See [What changed from the original](#what-changed-from-the-original).
 
 ## Disclosure: AI:W
 
@@ -17,72 +17,92 @@ My changes to this add-on are labelled **AI:W** under the [0rwx framework](https
 
 ## Features
 
-### Transcription & Translation
-*   **High-Performance Transcription**: Utilizes `Faster Whisper` for fast and accurate audio-to-text conversion.
-*   **Translate to English**: Translate audio from any supported language directly into English subtitles.
-*   **Extensive Model Support**: Choose from various models (`tiny`, `base`, `small`, `medium`, `large-v1/v2/v3`, and distilled versions) to balance speed and accuracy.
-*   **Hardware Acceleration**: Supports CUDA for significant speed-ups on NVIDIA GPUs, as well as CPU execution.
-*   **Optimized Performance**: Select compute types like `int8` or `float16` to optimize for speed and memory usage.
-*   **Voice Activity Detection (VAD)**: Intelligently filters out silent or non-speech segments for cleaner results.
-*   **Direct-to-Timeline**: Automatically creates and places styled text strips in the VSE timeline.
+### Transcription
+*   **Word-level timing**: Every word is stored with its own start and end, so captions can be regrouped at any time without transcribing again.
+*   **Visible part only**: Transcribes just the part of the selected strip that is on the timeline, and places the captions where the speech is.
+*   **Models**: `tiny`, `base`, `small`, `medium`, `distil-large-v3`, `large-v2` and `large-v3`.
+*   **GPU or CPU**: CUDA on NVIDIA GPUs, or CPU, with a choice of compute type (`float16`, `int8_float16`, `int8`, `float32`).
+*   **Language**: Automatic detection, or pick one of 21 languages.
+*   **Skip Silence**: Voice activity detection ignores silence and music.
+*   **Keep Stutters & Fillers**: Hints Whisper to write down "um", "uh" and repeated starts. It works partly; Whisper still drops some.
 
-### Editing & Management
-*   **List Editor**: View and edit all subtitles in a convenient, ordered list.
-*   **Timeline Sync**: Clicking an item in the list jumps to the corresponding strip in the timeline.
-*   **Batch Styling**: Copy text styling (font, size, color, shadow, box, etc.) from the active strip to all other selected text strips.
-*   **Quick Editing**: Add, remove, or ripple-delete subtitles and their corresponding footage range directly from the list.
-*   **Easy Navigation**: Use hotkeys or buttons to jump to the previous/next subtitle in the sequence.
-*   **Insert Line Breaks**: Easily add new lines to your subtitle text.
+### Caption look
+*   **Live styling**: Font, size, colour, bold, case, outline, shadow, box, position and wrap width apply to every caption as you change them.
+*   **Font picker**: Search the fonts installed on your computer by name.
+*   **Presets**: Save, load and delete presets for the look, grouping and animation settings.
 
-### Import & Export
-*   **Broad Format Support**: Import and export subtitles in various formats, including `.srt`, `.ass`, `.vtt`, and `.fountain`.
-*   **Legacy Translation**: An option to translate subtitle files on import is available (separate from the main transcription-translation feature).
+### Grouping and animation
+*   **Grouping**: Words per caption, maximum characters, a break after a pause, and optional breaks at sentence ends and commas.
+*   **Hold Through Gaps**: Keeps a caption on screen until the next one when the gap between them is short.
+*   **Hide Fillers / Hide Stutter Repeats**: Leave "um" and "uh", or immediately repeated words, out of the captions without deleting them from the transcript.
+*   **Pop-in and fade-in**: Added as plain keyframes, so any caption can be reshaped in the Graph Editor.
+*   **Regenerate**: Rebuild all captions from the stored words, or only the selected ones so hand-edited captions are left alone.
 
-## Tutorial (List Editor)
+### Speakers
+*   **Add as Another Speaker**: Transcribe a second strip and keep the existing captions. Each extra speaker goes one channel higher.
+*   **Per-speaker look**: Colour and position for each extra speaker.
+*   **Reassign**: Give the selected captions to another speaker.
 
-This video demonstrates the basics of the subtitle list editor.
+### Word editing
+*   **Word list**: Every transcribed word in order. Clicking a word moves the playhead to it and selects its caption. Double-click to fix the text.
+*   **Insert and delete**: Add a word Whisper missed, or remove one.
+*   **Timing nudge**: Move a word's start, end or both by one frame.
+*   **Split Caption Here**: Force a new caption at a word. The split survives Regenerate.
+*   **Keep Moved Captions**: Store the position of caption strips you dragged on the timeline, so Regenerate keeps them there.
 
-https://user-images.githubusercontent.com/1322593/223361423-36917ff0-2756-4e80-8c29-ce83096bf085.mp4
+### Export
+*   **SRT**: Export full sentences from the transcript, or one line per caption strip as shown.
 
 ## Installation
 
-1.  **Blender Version**: This addon requires **Blender 5.2** or newer.
-2.  **Download**: [Download the add-on as a .zip file](https://github.com/tin2tin/subtitle_editor/archive/refs/heads/main.zip). Do not unzip it.
-3.  **Windows Users**: For the initial setup, you must run Blender as an Administrator to allow the addon to install dependencies. Right-click the Blender icon and choose "Run as administrator". This is only needed once.
-4.  **Install the Add-on**: In Blender, go to `Edit > Preferences > Add-ons` and click `Install...`. Select the downloaded `.zip` file.
-5.  **Enable the Add-on**: Find "Subtitle Editor" in the list and check the box to enable it.
-6.  **Install Dependencies**:
-    *   Go to the Video Sequencer workspace.
-    *   Open the Sidebar (`N` key).
-    *   Go to the `Subtitle Editor` tab and find the **Transcription & Translation** panel.
-    *   Click the `Install/Verify Dependencies` button.
-    *   This will download and install `Faster Whisper` and its required libraries. This may take several minutes. You can monitor the progress in the Blender System Console (`Window > Toggle System Console`).
+1.  **Blender version**: Blender **5.2** or newer.
+2.  **Download**: [Download the add-on as a .zip file](https://github.com/paul-s-cameron/Caption-Suite/archive/refs/heads/main.zip). Do not unzip it.
+3.  **Original add-on**: If you have tin2tin's Subtitle Editor enabled, disable it first.
+4.  **Windows users**: Installing the libraries needs Blender to be run as administrator. Right-click the Blender icon and choose "Run as administrator".
+5.  **Install the add-on**: In Blender, go to `Edit > Preferences > Add-ons`, open the menu in the top right corner and choose `Install from Disk...`. Select the downloaded `.zip` file.
+6.  **Enable the add-on**: Find "Caption Suite" in the list and check the box to enable it.
+7.  **Install the libraries**:
+    *   Go to the Video Sequencer workspace and open the Sidebar (`N` key).
+    *   Go to the `Captions` tab and find the **Transcribe** panel.
+    *   Click `Install / Repair`. This downloads `Faster Whisper` and can take several minutes. Progress is shown in the System Console (`Window > Toggle System Console`).
+    *   For an NVIDIA GPU, also click `GPU Libraries`, then restart Blender.
 
-> [!TIP]
-> If the automatic installation fails, you can use the [blender_pip](https://github.com/amb/blender_pip) addon to manually install the required Python modules from the "Modules Used" section below.
+The libraries are installed into Blender's own Python. After installing a new version of Blender, click `Install / Repair` again.
 
-## Where to Find It
+The first transcription with each model downloads that model. The larger models are several gigabytes.
 
-*   **Main Panels**: In the `Sequencer`, open the UI Sidebar (`N` key) and click the **Subtitle Editor** tab. Here you will find:
-    *   **Subtitle Editor**: The list for editing and managing existing text strips.
-    *   **Transcription & Translation**: Controls for the `Faster Whisper` integration.
-*   **Import**: `Sequencer > Add Menu > Subtitles`.
-*   **Export**: From the `Subtitle Editor` list panel, click the export icon.
-*   **Copy Styling**: When a Text strip is active, the `Copy Properties to Selected` button appears in the `Sequencer > Sidebar > Strip Tab > Effect` panel.
+## Quick start
 
-## Transcription & Translation Panel
+1.  Select a video or audio strip in the Sequencer.
+2.  In the `Captions` tab, click **Transcribe to Captions**.
+3.  Adjust the style in **Caption Look**. Changes show at once.
+4.  Change the grouping or animation in **Grouping & Animation**, then click **Regenerate All**.
+5.  Fix any wrong words in **Words**.
+6.  Optional: click **Export SRT** in the Words panel.
 
-All settings for transcription and translation are located directly in the VSE sidebar for easy access.
+## Where to find it
 
-![image](https://github.com/user-attachments/assets/82594e0a-7af6-4461-a23f-a316b0a5024f)
+In the `Sequencer`, open the Sidebar (`N` key) and click the **Captions** tab. It has five panels: **Transcribe**, **Caption Look**, **Grouping & Animation**, **Speakers** and **Words**.
 
-## Legacy Import Translation
+## What changed from the original
 
-The addon also retains a feature to translate `.srt` files upon import.
+This fork replaces the original add-on's code. It adds word-level timing, live styling, pop-in animation, speakers, word editing and presets.
 
-https://user-images.githubusercontent.com/1322593/223357037-8ff2a9c8-9ce3-410d-a344-ec2a64448883.mp4
+These features of the original are not in this fork:
 
-## Modules Used
-This add-on relies on the following open-source libraries, which are installed automatically:
+*   Importing subtitle files (`.srt`, `.ass`, `.vtt`, `.fountain`).
+*   Translation to English.
+*   The list editor for existing text strips, and copying a style to selected strips.
+*   Export formats other than `.srt`.
+
+If you need them, use [tin2tin's Subtitle Editor](https://github.com/tin2tin/Subtitle_Editor).
+
+## Modules used
+
+This add-on relies on the following open-source library, installed by the `Install / Repair` button:
+
 *   [Faster Whisper](https://github.com/SYSTRAN/faster-whisper): A reimplementation of OpenAI's Whisper model for faster and more efficient transcription.
-*   [pysubs2](https://github.com/tkarabela/pysubs2): A library for editing subtitle files.
+
+## License and credits
+
+GPL version 2 or later, the same as the original. Based on [Subtitle Editor](https://github.com/tin2tin/Subtitle_Editor) by tin2tin.
