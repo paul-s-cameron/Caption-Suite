@@ -730,6 +730,23 @@ def generate(scene, runs=None, doomed=None):
     return len(made)
 
 
+def regen_strips(scene, strips):
+    """Rebuild just these caption strips from their words."""
+    words = scene.cc_words
+    idx = sorted({i for st in strips for i in range(st["cc_first"], st["cc_last"] + 1)
+                  if 0 <= i < len(words)})
+    if not idx:
+        return 0
+    runs, run_start, prev = [], idx[0], idx[0]
+    for i in idx[1:]:
+        if i != prev + 1:
+            runs.append((run_start, prev))
+            run_start = i
+        prev = i
+    runs.append((run_start, prev))
+    return generate(scene, runs=runs, doomed=list(strips))
+
+
 # ---------------------------------------------------------------------------
 # Properties
 # ---------------------------------------------------------------------------
@@ -1079,6 +1096,39 @@ class SEQUENCER_OT_cc_transcribe(Operator):
         return {"FINISHED"}
 
 
+class SEQUENCER_OT_cc_regenerate(Operator):
+    """Rebuild caption strips from the stored words using the current settings"""
+    bl_idname = "sequencer.cc_regenerate"
+    bl_label = "Regenerate Captions"
+    bl_options = {"REGISTER", "UNDO"}
+
+    only_selected: BoolProperty(
+        default=False,
+        description="Rebuild only the selected captions and leave hand-edited ones alone",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        scene = get_seq_scene(context)
+        return scene.sequence_editor is not None and len(scene.cc_words) > 0
+
+    def execute(self, context):
+        scene = get_seq_scene(context)
+        se = scene.sequence_editor
+        if not self.only_selected:
+            n = generate(scene)
+            self.report({"INFO"}, f"{n} captions rebuilt.")
+            return {"FINISHED"}
+
+        chosen = [st for st in caption_strips(se) if st.select]
+        if not chosen:
+            self.report({"WARNING"}, "Select some caption strips first.")
+            return {"CANCELLED"}
+        n = regen_strips(scene, chosen)
+        self.report({"INFO"}, f"{n} captions rebuilt.")
+        return {"FINISHED"}
+
+
 # ---------------------------------------------------------------------------
 # Panels
 # ---------------------------------------------------------------------------
@@ -1173,6 +1223,47 @@ class SEQUENCER_PT_cc_style(_CCPanel, Panel):
         layout.label(text="Changes here apply to all captions instantly.", icon="INFO")
 
 
+class SEQUENCER_PT_cc_build(_CCPanel, Panel):
+    bl_label = "Grouping & Animation"
+    bl_idname = "SEQUENCER_PT_cc_build"
+
+    def draw(self, context):
+        layout = self.layout
+        s = get_seq_scene(context).cc_settings
+
+        box = layout.box()
+        box.prop(s, "words_per_group")
+        box.prop(s, "max_chars")
+        box.prop(s, "gap_break")
+        box.prop(s, "hold_gap")
+        row = box.row(align=True)
+        row.prop(s, "break_on_sentence", text="Sentence Break", toggle=True)
+        row.prop(s, "break_on_comma", text="Comma Break", toggle=True)
+        box.prop(s, "channel")
+        row = box.row(align=True)
+        row.prop(s, "hide_fillers", toggle=True)
+        row.prop(s, "hide_repeats", toggle=True)
+
+        box = layout.box()
+        box.prop(s, "use_pop")
+        sub = box.column(align=True)
+        sub.enabled = s.use_pop
+        row = sub.row(align=True)
+        row.prop(s, "pop_frames")
+        row.prop(s, "pop_start_scale")
+        sub.prop(s, "pop_interpolation")
+        box.prop(s, "use_fade")
+        sub = box.row()
+        sub.enabled = s.use_fade
+        sub.prop(s, "fade_frames")
+
+        col = layout.column(align=True)
+        col.scale_y = 1.3
+        col.operator("sequencer.cc_regenerate", text="Regenerate All", icon="FILE_REFRESH").only_selected = False
+        col.operator("sequencer.cc_regenerate", text="Regenerate Selected Only").only_selected = True
+        layout.label(text="Regenerate All replaces hand-edited keyframes.", icon="INFO")
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -1186,8 +1277,10 @@ classes = (
     SEQUENCER_OT_cc_pick_font,
     SEQUENCER_OT_cc_rescan_fonts,
     SEQUENCER_OT_cc_transcribe,
+    SEQUENCER_OT_cc_regenerate,
     SEQUENCER_PT_cc_transcribe,
     SEQUENCER_PT_cc_style,
+    SEQUENCER_PT_cc_build,
 )
 
 
