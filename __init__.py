@@ -38,6 +38,7 @@ import sys
 import re
 import gc
 import glob
+import json
 import shutil
 import struct
 import ctypes
@@ -75,6 +76,7 @@ _model_cache = {"key": None, "model": None}
 _suspend = False                            # blocks update callbacks during bulk changes
 _font_cache = []                            # [(display name, path)]
 _font_enum = []                             # enum items, kept alive for Blender
+_preset_enum = []
 
 # Example of disfluent speech; nudges Whisper toward keeping stutters and fillers.
 VERBATIM_PROMPT = ("Umm, let me think like, hmm... Okay, here's what I'm, like, thinking. "
@@ -889,6 +891,14 @@ class CaptionSettings(PropertyGroup):
     fade_frames: IntProperty(name="Frames", default=2, min=1, max=60)
 
 
+LOOK_KEYS = ["font_path", "font_size", "color", "use_bold", "text_case", "strip_punctuation",
+             "use_outline", "outline_color", "outline_width", "use_shadow", "shadow_color",
+             "use_box", "box_color", "box_margin", "pos_x", "pos_y", "wrap_width"]
+BUILD_KEYS = ["words_per_group", "max_chars", "gap_break", "break_on_sentence", "break_on_comma",
+              "hold_gap", "hide_fillers", "hide_repeats", "use_pop", "pop_frames", "pop_start_scale", "pop_interpolation",
+              "use_fade", "fade_frames"]
+
+
 def word_text_update(self, context):
     if _suspend:
         return
@@ -1427,6 +1437,94 @@ class SEQUENCER_OT_cc_export_srt(Operator, ExportHelper):
 
 
 # ---------------------------------------------------------------------------
+# Presets
+# ---------------------------------------------------------------------------
+
+def _preset_dir():
+    return bpy.utils.user_resource("CONFIG", path="clip_captions_presets", create=True)
+
+
+def _preset_items(self, context):
+    global _preset_enum
+    names = sorted(os.path.splitext(f)[0] for f in os.listdir(_preset_dir()) if f.endswith(".json"))
+    _preset_enum = [(n, n, "") for n in names] or [("__none__", "No presets saved", "")]
+    return _preset_enum
+
+
+class SEQUENCER_OT_cc_preset_save(Operator):
+    """Save the current look, grouping and animation settings as a preset"""
+    bl_idname = "sequencer.cc_preset_save"
+    bl_label = "Save Caption Preset"
+
+    name: StringProperty(name="Name", default="My Style")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        s = get_seq_scene(context).cc_settings
+        safe = re.sub(r'[\\/:*?"<>|]', "_", self.name).strip() or "Preset"
+        data = {}
+        for k in LOOK_KEYS + BUILD_KEYS:
+            v = getattr(s, k)
+            data[k] = v if isinstance(v, (str, int, float, bool)) else list(v)
+        if data.get("font_path"):
+            data["font_path"] = bpy.path.abspath(data["font_path"])
+        with open(os.path.join(_preset_dir(), safe + ".json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        self.report({"INFO"}, f"Saved preset '{safe}'.")
+        return {"FINISHED"}
+
+
+class SEQUENCER_OT_cc_preset_load(Operator):
+    """Load a saved preset. The look applies at once; click Regenerate for grouping and animation"""
+    bl_idname = "sequencer.cc_preset_load"
+    bl_label = "Load Caption Preset"
+    bl_options = {"REGISTER", "UNDO"}
+
+    preset: EnumProperty(name="Preset", items=_preset_items)
+
+    def execute(self, context):
+        global _suspend
+        if self.preset in {"", "__none__"}:
+            return {"CANCELLED"}
+        s = get_seq_scene(context).cc_settings
+        try:
+            with open(os.path.join(_preset_dir(), self.preset + ".json"), encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError) as e:
+            self.report({"ERROR"}, f"Could not read preset: {e}")
+            return {"CANCELLED"}
+        _suspend = True
+        try:
+            for k, v in data.items():
+                if k in LOOK_KEYS or k in BUILD_KEYS:
+                    _set(s, k, v)
+        finally:
+            _suspend = False
+        style_update(s, context)
+        return {"FINISHED"}
+
+
+class SEQUENCER_OT_cc_preset_delete(Operator):
+    """Delete a saved preset"""
+    bl_idname = "sequencer.cc_preset_delete"
+    bl_label = "Delete Caption Preset"
+
+    preset: EnumProperty(name="Preset", items=_preset_items)
+
+    def execute(self, context):
+        if self.preset in {"", "__none__"}:
+            return {"CANCELLED"}
+        try:
+            os.remove(os.path.join(_preset_dir(), self.preset + ".json"))
+        except OSError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+# ---------------------------------------------------------------------------
 # Panels
 # ---------------------------------------------------------------------------
 
@@ -1484,6 +1582,11 @@ class SEQUENCER_PT_cc_style(_CCPanel, Panel):
     def draw(self, context):
         layout = self.layout
         s = get_seq_scene(context).cc_settings
+
+        row = layout.row(align=True)
+        row.operator_menu_enum("sequencer.cc_preset_load", "preset", text="Presets", icon="PRESET")
+        row.operator("sequencer.cc_preset_save", text="", icon="ADD")
+        row.operator_menu_enum("sequencer.cc_preset_delete", "preset", text="", icon="REMOVE")
 
         box = layout.box()
         box.label(text=f"Font: {font_label(s.font_path)}", icon="FONT_DATA")
@@ -1648,6 +1751,9 @@ classes = (
     SEQUENCER_OT_cc_keep_moves,
     SEQUENCER_OT_cc_assign_speaker,
     SEQUENCER_OT_cc_export_srt,
+    SEQUENCER_OT_cc_preset_save,
+    SEQUENCER_OT_cc_preset_load,
+    SEQUENCER_OT_cc_preset_delete,
     SEQUENCER_PT_cc_transcribe,
     SEQUENCER_PT_cc_style,
     SEQUENCER_PT_cc_build,
