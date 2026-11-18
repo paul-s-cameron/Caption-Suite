@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Blender backup files
+*.blend1
+
+# Zips built for testing
+*.zip
+
+# Editors and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Private notes and local settings for AI tools
+CLAUDE.local.md
+.claude/settings.local.json
