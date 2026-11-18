@@ -747,6 +747,18 @@ def regen_strips(scene, strips):
     return generate(scene, runs=runs, doomed=list(strips))
 
 
+def caption_before(scene, se, strip):
+    """The same speaker's previous caption, whose hold time depends on this one."""
+    spk = strip_speaker(scene, strip)
+    first = strip["cc_first"]
+    best = None
+    for st in caption_strips(se):
+        if st["cc_last"] < first and strip_speaker(scene, st) == spk:
+            if best is None or st["cc_last"] > best["cc_last"]:
+                best = st
+    return best
+
+
 # ---------------------------------------------------------------------------
 # Properties
 # ---------------------------------------------------------------------------
@@ -1129,6 +1141,202 @@ class SEQUENCER_OT_cc_regenerate(Operator):
         return {"FINISHED"}
 
 
+# ---------------------------------------------------------------------------
+# Word list
+# ---------------------------------------------------------------------------
+
+class SEQUENCER_UL_cc_words(UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
+        split = layout.split(factor=0.12)
+        split.label(text=str(item.speaker + 1))
+        split.prop(item, "text", text="", emboss=False, icon="TRIA_RIGHT" if item.brk else "NONE")
+
+
+def _shift_strip_indices(se, after, delta):
+    for st in caption_strips(se):
+        if st["cc_first"] > after:
+            st["cc_first"] += delta
+            st["cc_last"] += delta
+
+
+class SEQUENCER_OT_cc_word_delete(Operator):
+    """Remove the selected word from the captions"""
+    bl_idname = "sequencer.cc_word_delete"
+    bl_label = "Delete Word"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        scene = get_seq_scene(context)
+        return 0 <= scene.cc_word_index < len(scene.cc_words)
+
+    def execute(self, context):
+        scene = get_seq_scene(context)
+        se = scene.sequence_editor
+        i = scene.cc_word_index
+        owner = strip_for_word(se, i) if se else None
+        if owner is not None:
+            if owner["cc_first"] == owner["cc_last"]:
+                name = owner.name
+                se.strips.remove(owner)
+                remove_fcurves(scene, {name})
+                owner = None
+            else:
+                owner["cc_last"] -= 1
+        if se:
+            _shift_strip_indices(se, i if owner is None else owner["cc_last"], -1)
+        scene.cc_words.remove(i)
+        if owner is not None:
+            refresh_strip_text(scene, owner)
+        scene.cc_word_index = max(0, min(i, len(scene.cc_words) - 1))
+        return {"FINISHED"}
+
+
+class SEQUENCER_OT_cc_word_insert(Operator):
+    """Add a missed word after the selected one (it takes the second half of that word's time)"""
+    bl_idname = "sequencer.cc_word_insert"
+    bl_label = "Insert Word"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        scene = get_seq_scene(context)
+        return 0 <= scene.cc_word_index < len(scene.cc_words)
+
+    def execute(self, context):
+        global _suspend
+        scene = get_seq_scene(context)
+        se = scene.sequence_editor
+        i = scene.cc_word_index
+        cur = scene.cc_words[i]
+        mid = (cur.start + cur.end) / 2.0
+        end, seg, spk = cur.end, cur.seg, cur.speaker
+        owner = strip_for_word(se, i) if se else None
+        _suspend = True
+        try:
+            cur.end = mid
+            w = scene.cc_words.add()
+            w.name = w.text = "word"
+            w.start, w.end, w.seg, w.speaker = mid, end, seg, spk
+            scene.cc_words.move(len(scene.cc_words) - 1, i + 1)
+        finally:
+            _suspend = False
+        if se:
+            last = owner["cc_last"] if owner is not None else i
+            _shift_strip_indices(se, last, 1)
+            if owner is not None:
+                owner["cc_last"] += 1
+                refresh_strip_text(scene, owner)
+        scene.cc_word_index = i + 1
+        return {"FINISHED"}
+
+
+class SEQUENCER_OT_cc_word_step(Operator):
+    """Move to the previous or next word"""
+    bl_idname = "sequencer.cc_word_step"
+    bl_label = "Step Word"
+
+    step: IntProperty(default=1)
+
+    def execute(self, context):
+        scene = get_seq_scene(context)
+        if len(scene.cc_words):
+            scene.cc_word_index = max(0, min(scene.cc_word_index + self.step, len(scene.cc_words) - 1))
+        return {"FINISHED"}
+
+
+def _rebuild_around(scene, se, index):
+    """Rebuild the caption holding this word, plus the one before it."""
+    owner = strip_for_word(se, index) if se else None
+    if owner is None:
+        return
+    strips = [owner]
+    before = caption_before(scene, se, owner)
+    if before is not None:
+        strips.insert(0, before)
+    regen_strips(scene, strips)
+
+
+class SEQUENCER_OT_cc_word_nudge(Operator):
+    """Shift the selected word's timing by one frame"""
+    bl_idname = "sequencer.cc_word_nudge"
+    bl_label = "Nudge Word Timing"
+    bl_options = {"REGISTER", "UNDO"}
+
+    target: EnumProperty(items=[("START", "Start", ""), ("END", "End", ""), ("MOVE", "Move", "")],
+                         default="MOVE")
+    delta: IntProperty(default=1)
+
+    @classmethod
+    def poll(cls, context):
+        scene = get_seq_scene(context)
+        return 0 <= scene.cc_word_index < len(scene.cc_words)
+
+    def execute(self, context):
+        scene = get_seq_scene(context)
+        i = scene.cc_word_index
+        w = scene.cc_words[i]
+        if self.target in {"START", "MOVE"}:
+            w.start += self.delta
+        if self.target in {"END", "MOVE"}:
+            w.end += self.delta
+        if w.end < w.start + 1:
+            w.end = w.start + 1
+        _rebuild_around(scene, scene.sequence_editor, i)
+        word_index_update(scene, context)
+        return {"FINISHED"}
+
+
+class SEQUENCER_OT_cc_word_break(Operator):
+    """Start a new caption at the selected word, or undo that. Survives Regenerate"""
+    bl_idname = "sequencer.cc_word_break"
+    bl_label = "Split Caption Here"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        scene = get_seq_scene(context)
+        return 0 <= scene.cc_word_index < len(scene.cc_words)
+
+    def execute(self, context):
+        scene = get_seq_scene(context)
+        i = scene.cc_word_index
+        w = scene.cc_words[i]
+        w.brk = not w.brk
+        _rebuild_around(scene, scene.sequence_editor, i)
+        word_index_update(scene, context)
+        return {"FINISHED"}
+
+
+class SEQUENCER_OT_cc_keep_moves(Operator):
+    """Store the current position of caption strips you dragged, so Regenerate keeps them there"""
+    bl_idname = "sequencer.cc_keep_moves"
+    bl_label = "Keep Moved Captions"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        scene = get_seq_scene(context)
+        return scene.sequence_editor is not None and len(scene.cc_words) > 0
+
+    def execute(self, context):
+        scene = get_seq_scene(context)
+        words = scene.cc_words
+        moved = 0
+        for st in caption_strips(scene.sequence_editor):
+            a, b = st["cc_first"], st["cc_last"]
+            if not (0 <= a <= b < len(words)):
+                continue
+            delta = int(st.frame_final_start) - int(round(words[a].start))
+            if delta:
+                for i in range(a, b + 1):
+                    words[i].start += delta
+                    words[i].end += delta
+                moved += 1
+        self.report({"INFO"}, f"Stored {moved} moved captions.")
+        return {"FINISHED"}
+
+
 class SEQUENCER_OT_cc_assign_speaker(Operator):
     """Give the selected captions to this speaker (its color, position and channel)"""
     bl_idname = "sequencer.cc_assign_speaker"
@@ -1320,6 +1528,40 @@ class SEQUENCER_PT_cc_speakers(_CCPanel, Panel):
             row.prop(sp, "pos_y")
 
 
+class SEQUENCER_PT_cc_words(_CCPanel, Panel):
+    bl_label = "Words"
+    bl_idname = "SEQUENCER_PT_cc_words"
+
+    def draw(self, context):
+        layout = self.layout
+        scene = get_seq_scene(context)
+
+        row = layout.row()
+        row.template_list("SEQUENCER_UL_cc_words", "", scene, "cc_words", scene, "cc_word_index", rows=12)
+        col = row.column(align=True)
+        col.operator("sequencer.cc_word_insert", text="", icon="ADD")
+        col.operator("sequencer.cc_word_delete", text="", icon="REMOVE")
+        col.separator()
+        col.operator("sequencer.cc_word_step", text="", icon="TRIA_UP").step = -1
+        col.operator("sequencer.cc_word_step", text="", icon="TRIA_DOWN").step = 1
+        layout.label(text=f"{len(scene.cc_words)} words. Double-click one to fix it.")
+
+        def nudge(row, target, delta, icon):
+            op = row.operator("sequencer.cc_word_nudge", text="", icon=icon)
+            op.target, op.delta = target, delta
+
+        box = layout.box()
+        box.label(text="Selected word timing (frames)")
+        row = box.row(align=True)
+        for label, target in (("Start", "START"), ("End", "END"), ("Move", "MOVE")):
+            sub = row.row(align=True)
+            sub.label(text=label)
+            nudge(sub, target, -1, "TRIA_LEFT")
+            nudge(sub, target, 1, "TRIA_RIGHT")
+        box.operator("sequencer.cc_word_break", icon="SCULPTMODE_HLT")
+        box.operator("sequencer.cc_keep_moves", icon="SNAP_ON")
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -1334,11 +1576,19 @@ classes = (
     SEQUENCER_OT_cc_rescan_fonts,
     SEQUENCER_OT_cc_transcribe,
     SEQUENCER_OT_cc_regenerate,
+    SEQUENCER_UL_cc_words,
+    SEQUENCER_OT_cc_word_delete,
+    SEQUENCER_OT_cc_word_insert,
+    SEQUENCER_OT_cc_word_step,
+    SEQUENCER_OT_cc_word_nudge,
+    SEQUENCER_OT_cc_word_break,
+    SEQUENCER_OT_cc_keep_moves,
     SEQUENCER_OT_cc_assign_speaker,
     SEQUENCER_PT_cc_transcribe,
     SEQUENCER_PT_cc_style,
     SEQUENCER_PT_cc_build,
     SEQUENCER_PT_cc_speakers,
+    SEQUENCER_PT_cc_words,
 )
 
 
