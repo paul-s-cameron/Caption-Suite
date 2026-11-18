@@ -1129,6 +1129,33 @@ class SEQUENCER_OT_cc_regenerate(Operator):
         return {"FINISHED"}
 
 
+class SEQUENCER_OT_cc_assign_speaker(Operator):
+    """Give the selected captions to this speaker (its color, position and channel)"""
+    bl_idname = "sequencer.cc_assign_speaker"
+    bl_label = "Assign Speaker"
+    bl_options = {"REGISTER", "UNDO"}
+
+    speaker: IntProperty(default=0, min=0)
+
+    @classmethod
+    def poll(cls, context):
+        scene = get_seq_scene(context)
+        se = scene.sequence_editor
+        return se is not None and any(st.select for st in caption_strips(se))
+
+    def execute(self, context):
+        scene = get_seq_scene(context)
+        words = scene.cc_words
+        chosen = [st for st in caption_strips(scene.sequence_editor) if st.select]
+        for st in chosen:
+            for i in range(st["cc_first"], st["cc_last"] + 1):
+                if 0 <= i < len(words):
+                    words[i].speaker = self.speaker
+        n = regen_strips(scene, chosen)
+        self.report({"INFO"}, f"{n} captions set to speaker {self.speaker + 1}.")
+        return {"FINISHED"}
+
+
 # ---------------------------------------------------------------------------
 # Panels
 # ---------------------------------------------------------------------------
@@ -1173,6 +1200,9 @@ class SEQUENCER_PT_cc_transcribe(_CCPanel, Panel):
         big = col.row()
         big.scale_y = 1.4
         big.operator("sequencer.cc_transcribe", icon="REC").add_speaker = False
+        sub = col.row()
+        sub.enabled = len(get_seq_scene(context).cc_words) > 0
+        sub.operator("sequencer.cc_transcribe", text="Add as Another Speaker", icon="ADD").add_speaker = True
         if _model_cache["model"] is not None:
             col.operator("sequencer.cc_free_model", icon="X")
 
@@ -1264,6 +1294,32 @@ class SEQUENCER_PT_cc_build(_CCPanel, Panel):
         layout.label(text="Regenerate All replaces hand-edited keyframes.", icon="INFO")
 
 
+class SEQUENCER_PT_cc_speakers(_CCPanel, Panel):
+    bl_label = "Speakers"
+    bl_idname = "SEQUENCER_PT_cc_speakers"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = get_seq_scene(context)
+        count = max((w.speaker for w in scene.cc_words), default=0) + 1
+
+        layout.label(text="Set selected captions to speaker:")
+        row = layout.row(align=True)
+        for k in range(min(count + 1, 6)):
+            row.operator("sequencer.cc_assign_speaker",
+                         text=str(k + 1) if k < count else "New").speaker = k
+
+        layout.label(text="Speaker 1 uses Color and Position from Caption Look.", icon="INFO")
+        for k, sp in enumerate(scene.cc_extra_speakers):
+            box = layout.box()
+            box.label(text=f"Speaker {k + 2}  (channel +{k + 1})")
+            box.prop(sp, "color")
+            row = box.row(align=True)
+            row.prop(sp, "pos_x")
+            row.prop(sp, "pos_y")
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -1278,9 +1334,11 @@ classes = (
     SEQUENCER_OT_cc_rescan_fonts,
     SEQUENCER_OT_cc_transcribe,
     SEQUENCER_OT_cc_regenerate,
+    SEQUENCER_OT_cc_assign_speaker,
     SEQUENCER_PT_cc_transcribe,
     SEQUENCER_PT_cc_style,
     SEQUENCER_PT_cc_build,
+    SEQUENCER_PT_cc_speakers,
 )
 
 
