@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "caption_suite"
-version = "3.2.0"
+version = "3.3.0"
 name = "Caption Suite"
 tagline = "Word-timed Whisper captions with styling and animation"
 maintainer = "Paul Cameron"

@@ -29,11 +29,14 @@ import re
 import gc
 import glob
 import json
+import time
+import shutil
 import struct
 import ctypes
 import platform
 import importlib
 import importlib.metadata
+import importlib.util
 import subprocess
 import traceback
 
@@ -60,7 +63,10 @@ BASE_PACKAGES = [f"faster-whisper=={FASTER_WHISPER_VERSION}", "av<19"]
 # CUDA 12 runtime libraries that the NVIDIA driver does not ship.
 GPU_PACKAGES = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12==9.*"]
 
-_fw = None                                  # the imported faster_whisper module
+_whisper_path = None                        # where faster-whisper would load from; None if not installed
+_gpu_ready = False                          # the NVIDIA libraries are in their folder
+_gpu_used = False                           # a model was loaded on the GPU in this session
+_install = {"proc": None, "gpu": False, "new": "", "final": "", "lock": "", "started": 0.0, "message": ""}
 _model_cache = {"key": None, "model": None}
 _suspend = False                            # blocks update callbacks during bulk changes
 _font_cache = []                            # [(display name, path)]
@@ -108,27 +114,37 @@ def _set(obj, attr, value):
 # Dependencies
 # ---------------------------------------------------------------------------
 
-def check_faster_whisper():
-    global _fw
-    if _fw is not None:
-        return True
+def find_whisper():
+    """Note where faster-whisper would be imported from, without importing it.
+
+    The import itself waits for the first transcription. Blender starts faster, and as long
+    as nothing is loaded the library folder can be replaced by Install / Repair.
+    """
+    global _whisper_path
+    importlib.invalidate_caches()
     try:
-        importlib.invalidate_caches()
-        import faster_whisper
-        _fw = faster_whisper
-        return True
-    except Exception as e:
-        print(f"[Captions] faster-whisper not available: {e}")
-        _fw = None
-        return False
+        spec = importlib.util.find_spec("faster_whisper")
+    except (ImportError, ValueError):
+        spec = None
+    _whisper_path = spec.origin if spec and spec.origin else None
+    return _whisper_path
 
 
 def lib_dir():
-    """Folder the add-on keeps its libraries in.
+    """Folder for the Python libraries: Blender's own per-extension user folder.
 
-    It is outside Blender's own Python folder, so installing needs no administrator
-    rights and never replaces a library Blender ships. It is named for the Python
-    version, so every Blender that uses this Python shares one copy.
+    Blender keeps it when the extension is upgraded and removes it when the extension is
+    uninstalled. Each Blender version has its own, which is needed because the libraries
+    are chosen to agree with the ones that Blender version ships.
+    """
+    return bpy.utils.extension_path_user(__package__, path="libs")
+
+
+def gpu_dir():
+    """Folder for the NVIDIA libraries, shared by every Blender version.
+
+    They are about 2 GB of plain DLLs with nothing specific to a Blender or Python
+    version, so one copy in the user's profile serves all of them.
     """
     home = os.path.expanduser("~")
     if OS_NAME == "Windows":
@@ -137,135 +153,259 @@ def lib_dir():
         root = os.path.join(home, "Library", "Application Support")
     else:
         root = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
-    return os.path.join(root, "CaptionSuite", f"py{sys.version_info.major}{sys.version_info.minor}")
+    return os.path.join(root, "CaptionSuite", "gpu-cu12")
 
 
 def _gpu_dll_dirs(folder):
     return sorted(glob.glob(os.path.join(folder, "nvidia", "*", "bin")))
 
 
-def use_lib_dir():
-    """Let Python, and on Windows the DLL loader, find the libraries in lib_dir()."""
+def _inside(path, folder):
+    return os.path.normcase(os.path.join(path, "")).startswith(os.path.normcase(os.path.join(folder, "")))
+
+
+def _loaded_from(folder):
+    """True when Python has already imported something from this folder. Windows locks such files."""
+    for module in list(sys.modules.values()):
+        path = getattr(module, "__file__", None)
+        if path and _inside(path, folder):
+            return True
+    return False
+
+
+def use_lib_dirs():
+    """Let Python find the libraries and, on Windows, the DLL loader find the NVIDIA DLLs."""
+    global _gpu_ready
+    _gpu_ready = os.path.isdir(os.path.join(gpu_dir(), "nvidia"))
     folder = lib_dir()
-    if not os.path.isdir(folder):
-        return
     # Last on the search path: a library Blender ships is always found first.
-    if folder not in sys.path:
+    if os.path.isdir(folder) and folder not in sys.path:
         sys.path.append(folder)
     if OS_NAME == "Windows":
         # ctranslate2 loads the NVIDIA DLLs by name, which searches PATH. os.add_dll_directory
         # does not work for it. Added last, so a system-wide CUDA install keeps priority.
+        # This changes PATH for the running Blender only; nothing is saved to the system.
         parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
-        for d in _gpu_dll_dirs(folder):
+        for d in _gpu_dll_dirs(gpu_dir()):
             if d not in parts:
                 parts.append(d)
         os.environ["PATH"] = os.pathsep.join(parts)
 
 
-def drop_lib_dir():
-    """Undo use_lib_dir() when the add-on is disabled."""
+def drop_lib_dirs():
+    """Undo use_lib_dirs() when the add-on is disabled."""
     folder = lib_dir()
     if folder in sys.path:
         sys.path.remove(folder)
     if OS_NAME == "Windows":
-        inside = os.path.normcase(folder) + os.sep
-        parts = [p for p in os.environ.get("PATH", "").split(os.pathsep)
-                 if p and not os.path.normcase(p).startswith(inside)]
+        gpu = gpu_dir()
+        parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p and not _inside(p, gpu)]
         os.environ["PATH"] = os.pathsep.join(parts)
 
 
-def _write_constraints(folder):
+def _write_constraints(path):
     """List the libraries Blender ships, so pip picks versions that agree with them.
 
-    The folder comes last on the search path, so Blender's copy of a shared library
+    The library folder comes last on the search path, so Blender's copy of a shared library
     (numpy, for one) is the one that gets imported. Whatever is installed has to work with it.
     """
-    own = os.path.normcase(folder)
+    own = lib_dir()
     pins = set()
     for dist in importlib.metadata.distributions():
         name = dist.metadata["Name"]
-        if not name or os.path.normcase(str(dist.locate_file(""))).startswith(own):
-            continue
-        pins.add(f"{name}=={dist.version}")
-    path = os.path.join(folder, "blender_constraints.txt")
+        if name and not _inside(str(dist.locate_file("")), own):
+            pins.add(f"{name}=={dist.version}")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(sorted(pins)) + "\n")
     return path
 
 
-def _pip(args):
-    # -s keeps pip away from the per-user site folder, which Blender 5.1+ does not load.
-    cmd = [sys.executable, "-s", "-m", "pip"] + args
-    print("[Captions] Running:", " ".join(cmd))
-    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if p.stdout:
-        print(p.stdout)
-    if p.stderr:
-        print(p.stderr)
-    return p.returncode == 0
+def _remove_tree(path):
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+
+
+# A lock file next to the folder stops two Blenders installing into it at once. The running
+# install touches it every tick; one that has not been touched for this long was left behind.
+LOCK_STALE_SECONDS = 120
+
+
+def _take_lock(path):
+    try:
+        if os.path.exists(path) and time.time() - os.path.getmtime(path) > LOCK_STALE_SECONDS:
+            os.remove(path)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
+
+
+def _drop_lock(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def start_install(gpu):
+    """Start pip in the background, installing into a fresh folder beside the real one.
+
+    Returns an error message, or None once pip is running. finish_install() swaps the new
+    folder in, so a failed download leaves the working libraries as they were.
+    """
+    if _install["proc"] is not None:
+        return "An install is already running."
+    if not getattr(bpy.app, "online_access", True):
+        return ("Blender is set to work offline. Turn on Preferences > System > Network > "
+                "Allow Online Access, then click this button again.")
+    final = gpu_dir() if gpu else lib_dir()
+    if _gpu_used if gpu else _loaded_from(final):
+        return "These libraries are in use. Restart Blender, then click this button before transcribing."
+    new, lock = final + ".new", final + ".lock"
+    try:
+        os.makedirs(os.path.dirname(final), exist_ok=True)
+        if not _take_lock(lock):
+            return f"Another Blender is installing into this folder. If none is, delete {lock}"
+        try:
+            _remove_tree(new)
+            os.makedirs(new)
+            args = ["install", "--target", new, "--no-warn-script-location", "--disable-pip-version-check"]
+            if not gpu:
+                args += ["--constraint", _write_constraints(os.path.join(new, "blender_constraints.txt"))]
+            if importlib.util.find_spec("pip") is None:
+                subprocess.run([sys.executable, "-m", "ensurepip"], capture_output=True)
+            show_system_console()
+            # -s keeps pip away from the per-user site folder, which Blender 5.1+ does not load.
+            cmd = [sys.executable, "-s", "-m", "pip"] + args + (GPU_PACKAGES if gpu else BASE_PACKAGES)
+            print("[Captions] Running:", " ".join(cmd))
+            proc = subprocess.Popen(cmd)       # pip prints straight to the console as it works
+        except OSError:
+            _drop_lock(lock)
+            raise
+    except OSError as e:
+        return f"Could not prepare the library folder {final}: {e}"
+    _install.update(proc=proc, gpu=gpu, new=new, final=final, lock=lock, started=time.time(), message="")
+    return None
+
+
+def poll_install():
+    """None while pip is still running, else its exit code. Keeps the lock file fresh."""
+    code = _install["proc"].poll()
+    if code is None:
+        try:
+            os.utime(_install["lock"])
+        except OSError:
+            pass
+    return code
+
+
+def finish_install(code):
+    """Called once pip has ended. Returns (report level, message)."""
+    gpu, new, final, lock = (_install[k] for k in ("gpu", "new", "final", "lock"))
+    _install["proc"] = None
+    level, message = "INFO", "GPU libraries installed." if gpu else "Transcription libraries are ready."
+    try:
+        if code != 0:
+            level, message = "ERROR", "Install failed. See Window > Toggle System Console."
+        elif gpu and OS_NAME == "Windows" and not _gpu_dll_dirs(new):
+            level, message = "ERROR", "GPU libraries downloaded but their DLLs were not found. See console."
+        elif _gpu_used if gpu else _loaded_from(final):
+            level, message = "ERROR", "The libraries came into use during the install. Restart Blender and try again."
+        if level == "ERROR":
+            _remove_tree(new)
+        else:
+            _remove_tree(final)
+            os.replace(new, final)
+    except OSError as e:
+        level, message = "ERROR", f"Could not put the new libraries in place: {e}"
+    finally:
+        _drop_lock(lock)
+    if level != "ERROR":
+        use_lib_dirs()
+        if not gpu and find_whisper() is None:
+            level, message = "WARNING", "Installed, but faster-whisper was not found. Restart Blender."
+    _install["message"] = message
+    return level, message
+
+
+def stop_install():
+    """Abandon a running install, when the add-on is disabled."""
+    proc = _install["proc"]
+    if proc is None:
+        return
+    _install["proc"] = None
+    try:
+        proc.terminate()
+        proc.wait(timeout=10)
+        _remove_tree(_install["new"])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _drop_lock(_install["lock"])
+
+
+def _redraw_sequencers(context):
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == "SEQUENCE_EDITOR":
+                area.tag_redraw()
 
 
 class SEQUENCER_OT_cc_setup(Operator):
-    """Install or repair the transcription libraries in the add-on's own folder. No administrator rights needed"""
+    """Install or repair the transcription libraries in the add-on's own folders. No administrator rights needed"""
     bl_idname = "sequencer.cc_setup"
     bl_label = "Install / Repair"
     bl_options = {"REGISTER", "INTERNAL"}
 
     gpu: BoolProperty(default=False)
 
+    _timer = None
+
     def execute(self, context):
-        global _fw
-        if not getattr(bpy.app, "online_access", True):
-            self.report({"ERROR"}, "Blender is set to work offline. Turn on Preferences > System > "
-                                   "Network > Allow Online Access, then click this button again.")
+        error = start_install(self.gpu)
+        if error:
+            self.report({"ERROR"}, error)
             return {"CANCELLED"}
-        folder = lib_dir()
-        try:
-            os.makedirs(folder, exist_ok=True)
-            constraints = _write_constraints(folder)
-        except OSError as e:
-            self.report({"ERROR"}, f"Could not write to the library folder {folder}: {e}")
-            return {"CANCELLED"}
+        if bpy.app.background or context.window is None:
+            # No window means no timer to check back with, so wait here.
+            code = poll_install()
+            while code is None:
+                time.sleep(1.0)
+                code = poll_install()
+            return self._done(code)
+        self.report({"INFO"}, "Installing in the background. Progress is in the System Console.")
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.5, window=context.window)
+        wm.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
 
-        show_system_console()
-        subprocess.run([sys.executable, "-m", "ensurepip"], capture_output=True)
-        packages = GPU_PACKAGES if self.gpu else BASE_PACKAGES
-        args = ["install", "--target", folder, "--constraint", constraints, "--no-warn-script-location"]
-        # Replace what is there, except while the libraries are loaded and working: Windows
-        # locks loaded files. Without --upgrade pip only adds what is missing.
-        if self.gpu or _fw is None:
-            args.append("--upgrade")
-        self.report({"INFO"}, "Installing, see the System Console for progress...")
-        if not _pip(args + packages):
-            self.report({"ERROR"}, "Install failed. If you already transcribed in this session, restart "
-                                   "Blender and try again. See Window > Toggle System Console.")
-            return {"CANCELLED"}
-        use_lib_dir()
+    def modal(self, context, event):
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        code = poll_install() if _install["proc"] is not None else 1
+        _redraw_sequencers(context)             # keeps the panel's elapsed time moving
+        if code is None:
+            return {"PASS_THROUGH"}
+        context.window_manager.event_timer_remove(self._timer)
+        return self._done(code)
 
-        if self.gpu:
-            if OS_NAME == "Windows" and not _gpu_dll_dirs(folder):
-                self.report({"ERROR"}, "GPU libraries downloaded but their DLLs were not found. See console.")
-                return {"CANCELLED"}
-            self.report({"INFO"}, "GPU libraries installed. Restart Blender if they are not picked up.")
-            return {"FINISHED"}
-
-        _fw = None
-        if check_faster_whisper():
-            self.report({"INFO"}, "Transcription libraries are ready.")
-        else:
-            self.report({"WARNING"}, "Installed. Restart Blender to finish.")
-        return {"FINISHED"}
+    def _done(self, code):
+        level, message = finish_install(code)
+        self.report({level}, message)
+        return {"CANCELLED"} if level == "ERROR" else {"FINISHED"}
 
 
 class SEQUENCER_OT_cc_open_lib_dir(Operator):
-    """Open the folder the transcription libraries are installed in. To remove them, close Blender and delete it"""
+    """Open the folder these libraries are installed in. To remove them, close Blender and delete it"""
     bl_idname = "sequencer.cc_open_lib_dir"
     bl_label = "Open Library Folder"
 
+    gpu: BoolProperty(default=False)
+
     def execute(self, context):
-        folder = lib_dir()
+        folder = gpu_dir() if self.gpu else lib_dir()
         if not os.path.isdir(folder):
-            self.report({"WARNING"}, "Nothing is installed in the library folder yet.")
+            self.report({"WARNING"}, "Nothing is installed in that folder yet.")
             return {"CANCELLED"}
         bpy.ops.wm.path_open(filepath=folder)
         return {"FINISHED"}
@@ -285,12 +425,16 @@ class SEQUENCER_OT_cc_free_model(Operator):
 
 
 def get_model(size, device, compute):
+    global _gpu_used
+    import faster_whisper                   # first import happens here, not when Blender starts
     key = (size, device, compute)
     if _model_cache["key"] != key or _model_cache["model"] is None:
         _model_cache["model"] = None
         gc.collect()
         print(f"[Captions] Loading model {size} ({device}, {compute})")
-        _model_cache["model"] = _fw.WhisperModel(size, device=device, compute_type=compute)
+        if device == "cuda":
+            _gpu_used = True
+        _model_cache["model"] = faster_whisper.WhisperModel(size, device=device, compute_type=compute)
         _model_cache["key"] = key
     return _model_cache["model"]
 
@@ -1128,7 +1272,10 @@ class SEQUENCER_OT_cc_transcribe(Operator):
 
     @classmethod
     def poll(cls, context):
-        if _fw is None:
+        if _install["proc"] is not None:
+            cls.poll_message_set("The libraries are being installed.")
+            return False
+        if _whisper_path is None:
             cls.poll_message_set("Transcription libraries are not installed.")
             return False
         if get_source_strip(context) is None:
@@ -1589,14 +1736,26 @@ class SEQUENCER_PT_cc_transcribe(_CCPanel, Panel):
     def draw(self, context):
         layout = self.layout
         s = get_seq_scene(context).cc_settings
-        ready = _fw is not None
+        ready = _whisper_path is not None
+        busy = _install["proc"] is not None
 
-        row = layout.row(align=True)
+        setup = layout.column(align=True)
+        setup.enabled = not busy
+        row = setup.row(align=True)
         row.label(text="Libraries", icon="CHECKMARK" if ready else "ERROR")
         row.operator("sequencer.cc_setup", text="Install / Repair").gpu = False
+        row.operator("sequencer.cc_open_lib_dir", text="", icon="FILE_FOLDER").gpu = False
         if OS_NAME != "Darwin":
+            row = setup.row(align=True)
+            row.label(text="GPU", icon="CHECKMARK" if _gpu_ready else "BLANK1")
             row.operator("sequencer.cc_setup", text="GPU Libraries").gpu = True
-        row.operator("sequencer.cc_open_lib_dir", text="", icon="FILE_FOLDER")
+            row.operator("sequencer.cc_open_lib_dir", text="", icon="FILE_FOLDER").gpu = True
+        if busy:
+            secs = int(time.time() - _install["started"])
+            what = "GPU libraries" if _install["gpu"] else "libraries"
+            layout.label(text=f"Installing {what}... {secs // 60}:{secs % 60:02d}", icon="TIME")
+        elif _install["message"]:
+            layout.label(text=_install["message"], icon="INFO")
 
         col = layout.column()
         col.enabled = ready
@@ -1821,11 +1980,12 @@ def register():
     bpy.types.Scene.cc_word_index = IntProperty(default=0, update=word_index_update)
     bpy.types.Scene.cc_generation = IntProperty(default=0)
     bpy.types.Scene.cc_channel_used = IntProperty(default=0)
-    use_lib_dir()
-    check_faster_whisper()
+    use_lib_dirs()
+    find_whisper()
 
 
 def unregister():
+    stop_install()
     _model_cache["model"] = None
     _model_cache["key"] = None
     for prop in ("cc_settings", "cc_words", "cc_extra_speakers", "cc_word_index", "cc_generation", "cc_channel_used"):
@@ -1833,7 +1993,7 @@ def unregister():
             delattr(bpy.types.Scene, prop)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-    drop_lib_dir()
+    drop_lib_dirs()
 
 
 if __name__ == "__main__":
