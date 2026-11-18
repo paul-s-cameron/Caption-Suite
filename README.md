@@ -6,6 +6,15 @@ A suite of tools to empower working with subtitles and text strips in the Blende
 
 The addon's core feature is high-performance, multi-language audio transcription and translation powered by **Faster Whisper**. It also includes a full set of tools for importing, exporting, editing, and managing subtitles, such as a convenient list editor, batch styling, and timeline navigation.
 
+## Disclosure: AI:W
+
+My changes to this add-on are labelled **AI:W** under the [0rwx framework](https://0rwx.com/): AI writes the code and I read it.
+
+*   The code I add to this fork is written by an AI model (Claude), not by hand.
+*   I decide what gets built, read the changes, and test them in my own editing work in Blender before they are committed.
+*   The label covers my changes only. The original add-on is [Subtitle Editor](https://github.com/tin2tin/Subtitle_Editor) by tin2tin.
+*   I test on Windows with an NVIDIA GPU in Blender 5.3. Expect bugs, and save your project before trying it.
+
 ## Features
 
 ### Transcription & Translation
